@@ -986,7 +986,47 @@ async function parseJsonBounded<T>(
  *
  * Keyless, no signup.
  */
-import { AK_CHAPTERS, AK_TITLES, AK_INDEX_CAPTURED_AT, type AkChapterRow } from './ak-index-data.js';
+import type { AkChapterRow, AkTitleRow } from './ak-index-data.js';
+
+// fleet #3358 (mechanism: fleet #2754). The baked title/chapter index is
+// served from KV, not from the gateway bundle: 94 KiB raw / 18.3 KiB of the
+// gateway's COMPRESSED script (measured as the marginal gzip delta) for a
+// table only this pack reads. workers/gateway/src/pack-baked-indexes.json
+// registers ak-index-data.ts; scripts/sync-gateway-static-json.mjs uploads
+// its exports at deploy; the dispatch path injects the parsed object as
+// `args._bakedIndex` on every call into this pack.
+//
+// NEVER value-import ./ak-index-data.js here — the type-only import above is
+// erased from the bundle; a value import is not.
+let AK_CHAPTERS: AkChapterRow[] = [];
+let AK_TITLES: AkTitleRow[] = [];
+let AK_INDEX_CAPTURED_AT = '';
+
+/**
+ * Adopt the injected index for this isolate's life. LOUD on absence, never
+ * silent: ak_search answering "no chapter matched" because KV hiccupped
+ * would be a wrong answer dressed as a real one (docs/silent-zero-policy.md).
+ */
+function ensureIndex(args: Record<string, unknown>): void {
+  if (AK_CHAPTERS.length) return;
+  const idx = args._bakedIndex as Record<string, unknown> | null | undefined;
+  const chapters = idx?.AK_CHAPTERS;
+  const titles = idx?.AK_TITLES;
+  const capturedAt = idx?.AK_INDEX_CAPTURED_AT;
+  if (
+    !Array.isArray(chapters) || chapters.length === 0 ||
+    !Array.isArray(titles) || titles.length === 0 ||
+    typeof capturedAt !== 'string'
+  ) {
+    throw new Error(
+      `alaska-code: the baked title/chapter index is unavailable (${idx == null ? 'not injected' : 'malformed'}). ` +
+        'The gateway loads it from KV on the first call into this pack; this is a server-side fault, not "no match" — retry shortly, or call ak_statute with a full citation, which fetches live.',
+    );
+  }
+  AK_CHAPTERS = chapters as AkChapterRow[];
+  AK_TITLES = titles as AkTitleRow[];
+  AK_INDEX_CAPTURED_AT = capturedAt;
+}
 
 const UA = 'pipeworx-mcp-alaska-code/1.0 (+https://pipeworx.io)';
 const UPSTREAM = 'Alaska State Legislature (akleg.gov)';
@@ -1128,6 +1168,10 @@ async function akStatute(args: Record<string, unknown>) {
   if (!res.ok) throw await httpError(res, `Alaska Statutes fetch (AS ${secStart})`);
   const buf = await res.arrayBuffer();
   if (buf.byteLength === 0) {
+    // Only HERE does ak_statute need the index — to say whether the chapter
+    // exists. The live-text path above is deliberately left able to answer
+    // with KV down.
+    ensureIndex(args);
     const chap = chaptersByKey().get(`${title}.${Number(chapter)}`);
     return {
       found: false,
@@ -1198,6 +1242,7 @@ function wordWeights(words: string[], haystacks: string[]): Map<string, number> 
 }
 
 async function akSearch(args: Record<string, unknown>) {
+  ensureIndex(args);
   const q = String(args.query ?? '').trim();
   if (!q) {
     return {
