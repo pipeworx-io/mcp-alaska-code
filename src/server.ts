@@ -11,7 +11,7 @@ import * as bakedIndexModule from './ak-index-data.js';
 const bakedIndex = Object.fromEntries(Object.entries(bakedIndexModule));
 
 const server = new Server(
-  { name: '@pipeworx/mcp-alaska-code', version: '0.1.2' },
+  { name: '@pipeworx/mcp-alaska-code', version: '0.1.3' },
   { capabilities: { tools: {} } },
 );
 
